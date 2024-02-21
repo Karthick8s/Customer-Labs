@@ -5,22 +5,73 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
 // Incoming Request
 type Request struct {
-	Ev  string                 `json:"ev"`
-	Et  string                 `json:"et"`
-	Id  string                 `json:"id"`
-	Uid string                 `json:"uid"`
-	Mid string                 `json:"mid"`
-	T   string                 `json:"t"`
-	P   string                 `json:"p"`
-	L   string                 `json:"l"`
-	Sc  string                 `json:"sc"`
-	Atr map[string]interface{} `json:"attributes"`
-	Uat map[string]interface{} `json:"traits"`
+	Ev  string            `json:"ev"`
+	Et  string            `json:"et"`
+	Id  string            `json:"id"`
+	Uid string            `json:"uid"`
+	Mid string            `json:"mid"`
+	T   string            `json:"t"`
+	P   string            `json:"p"`
+	L   string            `json:"l"`
+	Sc  string            `json:"sc"`
+	Atr map[string]string `json:"-"`
+	Uat map[string]string `json:"-"`
+}
+
+// UnmarshalJSON
+func (r *Request) UnmarshalJSON(data []byte) error {
+	type TempRequest struct {
+		Ev  string            `json:"ev"`
+		Et  string            `json:"et"`
+		Id  string            `json:"id"`
+		Uid string            `json:"uid"`
+		Mid string            `json:"mid"`
+		T   string            `json:"t"`
+		P   string            `json:"p"`
+		L   string            `json:"l"`
+		Sc  string            `json:"sc"`
+		Atr map[string]string `json:"-"`
+		Uat map[string]string `json:"-"`
+	}
+
+	// Unmarshal the JSON into the temporary struct
+	var temp TempRequest
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return err
+	}
+
+	// Copy the fields from the temporary struct to the main struct
+	*r = Request(temp)
+
+	// Extract atr and uat fields
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+
+	atr := make(map[string]string)
+	uat := make(map[string]string)
+
+	for key, value := range m {
+		if len(key) >= 4 && key[:4] == "atrk" {
+			index := key[4:]
+			atr[value.(string)] = m["atrv"+index].(string)
+		} else if len(key) >= 5 && key[:5] == "uatrk" {
+			index := key[5:]
+			uat[value.(string)] = m["uatrv"+index].(string)
+		}
+	}
+
+	r.Atr = atr
+	r.Uat = uat
+
+	return nil
 }
 
 // Response Structure
@@ -45,11 +96,10 @@ type Details struct {
 }
 
 func main() {
-
 	// Channel to send requests
 	requests := make(chan Request)
 
-	// Start the HTTP Server to recive requests
+	// Start the HTTP Server to receive requests
 	go StartHTTPServer(requests)
 
 	// Create a worker with 5 workers
@@ -59,13 +109,14 @@ func main() {
 
 	// Wait
 	select {}
-
 }
 
 func StartHTTPServer(requests chan<- Request) {
 	http.HandleFunc("/receive", func(w http.ResponseWriter, r *http.Request) {
+
 		decoder := json.NewDecoder(r.Body)
 		var req Request
+
 		err := decoder.Decode(&req)
 		if err != nil {
 			http.Error(w, "Invalid Request Format", http.StatusBadRequest)
@@ -85,46 +136,8 @@ func StartHTTPServer(requests chan<- Request) {
 func worker(requests <-chan Request) {
 	for req := range requests {
 		// Convert the request into Response format
-		res := Response{
-			Event:      req.Ev,
-			EventType:  req.Et,
-			AppID:      req.Id,
-			UserID:     req.Uid,
-			MessageID:  req.Mid,
-			PageTitle:  req.T,
-			PageURL:    req.P,
-			Language:   req.L,
-			Screen:     req.Sc,
-			Attributes: make(map[string]Details),
-			Traits:     make(map[string]Details),
-		}
+		res := convertToResponse(req)
 
-		// Convert Attributes
-		for key, value := range req.Atr {
-
-			// Check if key starts with "atrk" to parse attributes
-			if strings.HasPrefix(key, "atrk") {
-				attrKey := strings.Replace(key, "atrk", "", 1)
-				attrTypeKey := "atrt" + attrKey
-				attrType, ok := req.Atr[attrTypeKey].(string)
-				if !ok {
-					fmt.Println("Invalid attribute type key")
-					continue
-				}
-				res.Attributes[attrKey] = Details{
-					Value: value,
-					Type:  attrType,
-				}
-			}
-		}
-
-		// Convert Traits
-		for key, value := range req.Uat {
-			res.Traits[key] = Details{
-				Value: value,
-				Type:  getType(value),
-			}
-		}
 		// Send the response to Webhook site
 		err := sendToWebhookSite(res)
 		if err != nil {
@@ -137,16 +150,54 @@ func worker(requests <-chan Request) {
 
 }
 
-func getType(value interface{}) string {
-
-	switch value.(type) {
-	case int, int32, int64, uint, uint16, uint32, uint8, float32, float64:
-		return "number"
-	case bool:
-		return "boolean"
-	default:
-		return "string"
+func convertToResponse(req Request) Response {
+	res := Response{
+		Event:      req.Ev,
+		EventType:  req.Et,
+		AppID:      req.Id,
+		UserID:     req.Uid,
+		MessageID:  req.Mid,
+		PageTitle:  req.T,
+		PageURL:    req.P,
+		Language:   req.L,
+		Screen:     req.Sc,
+		Attributes: make(map[string]Details),
+		Traits:     make(map[string]Details),
 	}
+
+	for key, value := range req.Atr {
+		res.Attributes[key] = Details{
+			Value: value,
+			Type:  getType(value),
+		}
+	}
+	for key, value := range req.Uat {
+		res.Traits[key] = Details{
+			Value: value,
+			Type:  getType(value),
+		}
+	}
+
+	return res
+}
+
+// getType returns the type of the value
+func getType(value string) string {
+
+	// Remove  double quotes
+	trimmedValue := strings.Trim(value, `"`)
+
+	// Check if  value is a number
+	if _, err := strconv.ParseFloat(trimmedValue, 64); err == nil {
+		return "number"
+	}
+
+	// Check if value represents is a boolean
+	if _, err := strconv.ParseBool(trimmedValue); err == nil {
+		return "boolean"
+	}
+
+	return "string"
 }
 
 func sendToWebhookSite(res Response) error {
