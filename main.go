@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Incoming Request
@@ -99,21 +100,27 @@ func main() {
 	// Channel to send requests
 	requests := make(chan Request)
 
-	// Start the HTTP Server to receive requests
-	go StartHTTPServer(requests)
+	var wg sync.WaitGroup
 
-	// Create a worker with 5 workers
-	for i := 0; i < 5; i++ {
-		go worker(requests)
+	// Start the HTTP Server to receive requests
+	go StartHTTPServer(requests, &wg)
+
+	workerCount := 3
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker(requests, &wg)
 	}
 
-	// Wait
-	select {}
+	wg.Wait()
+
+	fmt.Println("All Go Routine  Workers have Finished")
+
 }
 
-func StartHTTPServer(requests chan<- Request) {
-	http.HandleFunc("/receive", func(w http.ResponseWriter, r *http.Request) {
+func StartHTTPServer(requests chan<- Request, wg *sync.WaitGroup) {
+	defer wg.Done()
 
+	http.HandleFunc("/receive", func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req Request
 
@@ -131,9 +138,12 @@ func StartHTTPServer(requests chan<- Request) {
 	})
 	fmt.Println("Server running on port 0808")
 	http.ListenAndServe(":0808", nil)
+
 }
 
-func worker(requests <-chan Request) {
+func worker(requests <-chan Request, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	for req := range requests {
 		// Convert the request into Response format
 		res := convertToResponse(req)
